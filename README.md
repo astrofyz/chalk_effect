@@ -90,6 +90,8 @@ also be attached to a single artist with `artist.set_path_effects([ChalkEffect()
 | `keep_fill` | `True` | For filled patches (bars, wedges, `fill_between`), paint the original face colour **flat** first, then lay chalk on the outline. `False` drops the fill and keeps only the grained edge. |
 | `fill_density` | `0.0` | Grains per 100×100 px scattered across a filled patch's **interior**, so the fill itself is chalky rather than a flat block. `0` leaves it flat. Roughly `300` for light shading, `2000`+ for a near-solid dusty fill. Pair with `keep_fill=False` for a translucent shaded look, or `keep_fill=True` for a flat base plus dusty overlay. |
 | `fill_max` | `20000` | Hard cap on interior grains per patch, so a huge polygon can't blow up the draw time. |
+| `hatch` | `None` | Draw a patch's hatch as chalky grain lines. matplotlib paints hatches inside the renderer, not as an artist, so `ChalkEffect` otherwise **drops them entirely**. `None` honours each patch's own `hatch=` (`/ \ | - + x`, and repeats like `///` for denser lines — `o O . *` are unsupported and skipped). Pass a hatch string or an angle in degrees here to force one on every patch. Works with `fill=False` too. |
+| `hatch_spacing` | `8.0` | Pixels between hatch lines (divided by the repeat count). Grains along each line use `spacing`. Smaller smears into a dusty fill; larger gives distinct strokes. |
 | `skip_text` | `True` | Never grain text — draw every glyph crisp. Detected structurally: a filled path drawn with linewidth 0 (matplotlib's `_draw_text_as_path` forces that) that is also curved, multi-subpath, or short (`< 4 × min_extent` px tall) — so straight-edged digits and the minus sign are caught too. Checked **before** the `min_extent` guard so short tick labels don't slip through. `False` lets text be grained. The chalk look for labels comes from the `font` you pass to `chalk()`, not the grain. |
 | `min_extent` | `26.0` | Artists whose pixel bounding box is smaller than this in **both** dimensions skip the grainy **outline** (it would just swamp them) and get a crisp edge instead — keeps tick marks and small markers sharp. A small **filled** patch (a short histogram bar) still gets the `keep_fill` / `fill_density` fill treatment, so it matches its taller neighbours. Set to `0` to texturize everything. |
 | `flat_bg` | `0.5` | A filled rectangle (≤ 5 vertices) whose bounding box covers at least this fraction of the canvas is painted **flat, with no grain**. This removes the grainy frame around the whole figure and the redundant border on the axes background — the spines still get chalked. Set to `1.0` to spare only a full-canvas figure patch, or `0` to grain every rectangle. |
@@ -154,6 +156,18 @@ with chalk(sketch=(1, 100, 1), spread=0.8, passes=2, wander=1.0):
 with chalk(spread=2.2, jitter=1.4, grain=3.0, passes=4, spacing=1.3):
     ...
 ```
+
+**Chalky hatched bars** — the `hatch=` on each patch is redrawn as grain lines
+(matplotlib's own hatch is otherwise dropped):
+
+```python
+with chalk(sketch=None):
+    ax.bar(x, y, facecolor="none", edgecolor="#a8d8ff", hatch="//")
+    ax.bar(x, y2, facecolor="none", edgecolor="#ffb3c6", hatch="xx")
+```
+
+Or force one angle on every patch: `chalk(sketch=None, hatch=45)`. Widen the
+lines with `hatch_spacing`.
 
 **Recolour the board** (e.g. dark green chalkboard):
 

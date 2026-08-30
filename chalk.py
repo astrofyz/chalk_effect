@@ -126,6 +126,44 @@ def _smooth_noise(rng, n, amp, window=31):
     return s / (s.std() + 1e-12) * amp
 
 
+_HATCH_ANGLE = {"/": 45.0, "\\": -45.0, "|": 90.0, "-": 0.0}
+
+
+def _hatch_angles(spec):
+    """Map a matplotlib hatch spec to ``(angles_deg, density)``.
+
+    *spec* may be a hatch string (``"/"``, ``"\\\\"``, ``"|"``, ``"-"``,
+    ``"+"``, ``"x"`` and repeats/combos), a number (a single angle), or an
+    iterable of numbers.  Curved hatches (``o O . *``) carry no line angle and
+    are dropped.  *density* is the largest single-character repeat count
+    (``"///"`` -> 3), used to tighten the line spacing.
+    """
+    if spec is None or spec == "":
+        return [], 1
+    if isinstance(spec, (int, float)):
+        return [float(spec)], 1
+    if not isinstance(spec, str):
+        try:
+            return [float(a) for a in spec], 1
+        except (TypeError, ValueError):
+            return [], 1
+    angles = []
+    for ch in spec:
+        if ch in _HATCH_ANGLE:
+            angles.append(_HATCH_ANGLE[ch])
+        elif ch == "x":
+            angles += [45.0, -45.0]
+        elif ch == "+":
+            angles += [0.0, 90.0]
+    out = []
+    for a in angles:
+        if a not in out:
+            out.append(a)
+    density = max((spec.count(c) for c in set(spec) if c in "/\\|-+x"),
+                  default=1)
+    return out, max(1, density)
+
+
 # --------------------------------------------------------------------------- #
 # the path effect
 # --------------------------------------------------------------------------- #
@@ -178,6 +216,20 @@ class ChalkEffect(AbstractPathEffect):
     fill_max : int
         Hard cap on interior grains per patch, so a huge polygon can't blow
         up the draw.  Default ``20000``.
+    hatch : str, float, or None
+        Draw a patch's hatch as chalky grain lines.  ``ChalkEffect`` otherwise
+        drops matplotlib's crisp hatch pattern entirely, since it is painted
+        inside the renderer rather than as its own artist.  ``None`` (default)
+        honours whatever ``hatch=`` each patch was given -- ``"/"``, ``"\\"``,
+        ``"|"``, ``"-"``, ``"+"``, ``"x"``, and repeats like ``"///"`` for
+        denser lines.  Pass a value here -- a hatch string or an angle in
+        degrees -- to force one on every patch.  Curved hatches (``o O . *``)
+        are unsupported and skipped.  Works whether or not the patch is filled.
+    hatch_spacing : float
+        Pixels between hatch lines (divided by the repeat count, so ``"///"``
+        draws 3x denser).  Grains along each line are spaced by ``spacing``.
+        Default ``8.0``; smaller smears into a dusty fill, larger gives
+        distinct strokes.
     skip_text : bool
         If True (default) text is always drawn crisply, never grained.
         Detected structurally: a filled Bezier path drawn with linewidth 0
@@ -207,6 +259,7 @@ class ChalkEffect(AbstractPathEffect):
     def __init__(self, spacing=2.0, spread=1.5, jitter=0.5, wander=0.2,
                  wander_length=50.0, grain=2.2, alpha=0.9, passes=3, seed=None,
                  keep_fill=True, fill_density=0.0, fill_max=20000,
+                 hatch=None, hatch_spacing=8.0,
                  skip_text=True, min_extent=26.0, flat_bg=0.5,
                  ref_linewidth=2.0):
         super().__init__()
@@ -222,6 +275,8 @@ class ChalkEffect(AbstractPathEffect):
         self.keep_fill = keep_fill
         self.fill_density = fill_density
         self.fill_max = fill_max
+        self.hatch = hatch
+        self.hatch_spacing = hatch_spacing
         self.skip_text = skip_text
         self.min_extent = min_extent
         self.flat_bg = flat_bg
@@ -266,16 +321,26 @@ class ChalkEffect(AbstractPathEffect):
 
         # small artists -> don't grain the outline into fuzz
         if bb.width < self.min_extent and bb.height < self.min_extent:
-            if rgbFace is None:
+            hatched = bool(_hatch_angles(
+                self.hatch if self.hatch is not None else gc.get_hatch())[0])
+            if rgbFace is None and not hatched:
                 # tick mark / tiny line marker -> draw crisp, done
                 renderer.draw_path(gc, tpath, affine, rgbFace)
                 return
-            # small filled patch (a short histogram bar) -> keep it consistent
-            # with tall bars: crisp thin edge, optional flat base, chalky fill;
-            # just skip the grainy outline that would swamp it
+            # small filled/hatched patch (a short histogram bar) -> keep it
+            # consistent with its taller neighbours: crisp thin edge, optional
+            # flat base, chalky fill/hatch; just skip the grainy outline
             face = rgbFace if self.keep_fill else None
-            renderer.draw_path(gc, tpath, affine, face)
+            if hatched:
+                gce = renderer.new_gc()
+                gce.copy_properties(gc)
+                gce.set_hatch(None)      # our chalk hatch replaces the crisp one
+                renderer.draw_path(gce, tpath, affine, face)
+                gce.restore()
+            else:
+                renderer.draw_path(gc, tpath, affine, face)
             self._chalk_fill(renderer, gc, path, bb, rgbFace, rng, grain)
+            self._chalk_hatch(renderer, gc, path, bb, rng, grain)
             return
         # big filled rectangle (figure patch, axes background) -> paint flat,
         # no grainy frame around the figure
@@ -289,10 +354,12 @@ class ChalkEffect(AbstractPathEffect):
             gcf = renderer.new_gc()
             gcf.copy_properties(gc)
             gcf.set_linewidth(0)
+            gcf.set_hatch(None)          # chalk hatch (below) replaces the crisp one
             renderer.draw_path(gcf, path, IdentityTransform(), rgbFace)
             gcf.restore()
 
         self._chalk_fill(renderer, gc, path, bb, rgbFace, rng, grain)
+        self._chalk_hatch(renderer, gc, path, bb, rng, grain)
 
         stations = []
         for verts in _polylines(path):
@@ -317,6 +384,7 @@ class ChalkEffect(AbstractPathEffect):
         gc0 = renderer.new_gc()
         gc0.copy_properties(gc)
         gc0.set_linewidth(0)
+        gc0.set_hatch(None)
         gc0.set_sketch_params(None)          # our grains shouldn't be re-wiggled
         r, g, b, _ = mcolors.to_rgba(gc.get_rgb())
         marker = Path.unit_circle()
@@ -335,6 +403,27 @@ class ChalkEffect(AbstractPathEffect):
             )
         gc0.restore()
 
+    def _spray(self, renderer, gc, pts, color, grain, rng,
+               layers=((1.0, 0.85), (0.55, 1.0))):
+        """Lay *pts* (an (N, 2) pixel array) down as layered chalk grains."""
+        if not len(pts):
+            return
+        r, g, b, a0 = mcolors.to_rgba(color)
+        gcs = renderer.new_gc()
+        gcs.copy_properties(gc)
+        gcs.set_linewidth(0)
+        gcs.set_hatch(None)
+        gcs.set_sketch_params(None)
+        for size, a in layers:
+            jit = pts + rng.normal(0.0, 0.5 * self.jitter, pts.shape)
+            renderer.draw_markers(
+                gcs, Path.unit_circle(),
+                Affine2D().scale(size * grain / 2.0),
+                Path(jit), IdentityTransform(),
+                (r, g, b, min(1.0, a * a0 * self.alpha)),
+            )
+        gcs.restore()
+
     def _chalk_fill(self, renderer, gc, path, bb, rgbFace, rng, grain):
         """Scatter grains across a filled patch's interior (``fill_density``)."""
         if (not self.fill_density or rgbFace is None
@@ -348,22 +437,43 @@ class ChalkEffect(AbstractPathEffect):
         pts = np.column_stack([rng.uniform(bb.x0, bb.x1, n),
                                rng.uniform(bb.y0, bb.y1, n)])
         pts = pts[path.contains_points(pts)]
-        if not len(pts):
+        self._spray(renderer, gc, pts, rgbFace, grain, rng)
+
+    def _chalk_hatch(self, renderer, gc, path, bb, rng, grain):
+        """Draw the patch's hatch as chalky grain lines.
+
+        Honours the patch's own ``hatch=`` (read off *gc*) unless this effect
+        was built with an explicit ``hatch=``.  matplotlib's own crisp hatch
+        is dropped elsewhere -- it is painted inside the renderer, not as an
+        artist we can hand a path effect to.
+        """
+        spec = self.hatch if self.hatch is not None else gc.get_hatch()
+        angles, density = _hatch_angles(spec)
+        if not angles or bb.width <= 0 or bb.height <= 0:
             return
-        fr, fg, fb, fa = mcolors.to_rgba(rgbFace)
-        gcf = renderer.new_gc()
-        gcf.copy_properties(gc)
-        gcf.set_linewidth(0)
-        gcf.set_sketch_params(None)
-        for size, a in ((1.0, 0.85), (0.55, 1.0)):
-            jit = pts + rng.normal(0.0, 0.5 * self.jitter, pts.shape)
-            renderer.draw_markers(
-                gcf, Path.unit_circle(),
-                Affine2D().scale(size * grain / 2.0),
-                Path(jit), IdentityTransform(),
-                (fr, fg, fb, min(1.0, a * fa * self.alpha)),
-            )
-        gcf.restore()
+        try:
+            color = gc.get_hatch_color() if gc.get_hatch() else gc.get_rgb()
+        except Exception:
+            color = gc.get_rgb()
+
+        cx, cy = 0.5 * (bb.x0 + bb.x1), 0.5 * (bb.y0 + bb.y1)
+        reach = float(np.hypot(bb.width, bb.height))
+        along = np.arange(-reach / 2.0, reach / 2.0, max(self.spacing, 0.5))
+        across = np.arange(-reach / 2.0, reach / 2.0,
+                           max(self.hatch_spacing / density, 1.0))
+        if not len(along) or not len(across):
+            return
+        u, v = np.meshgrid(along, across)
+        grid = np.column_stack([u.ravel(), v.ravel()])
+        for deg in angles:
+            t = np.radians(deg)
+            rot = np.array([[np.cos(t), -np.sin(t)],
+                            [np.sin(t), np.cos(t)]])
+            pts = grid @ rot.T + (cx, cy)
+            pts = pts[path.contains_points(pts)]
+            if len(pts) > self.fill_max:
+                pts = pts[rng.random(len(pts)) < self.fill_max / len(pts)]
+            self._spray(renderer, gc, pts, color, grain, rng)
 
 
 # --------------------------------------------------------------------------- #
