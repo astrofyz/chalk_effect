@@ -1,8 +1,6 @@
 # chalk
 
-Chalk-on-a-blackboard styling for matplotlib, applied **globally** like
-`plt.xkcd()` — every line, spine, tick, grid line, patch edge and legend frame
-in the figure gets the treatment, not just artists you opt in by hand.
+Chalk-on-a-blackboard styling for matplotlib, applied globally.
 
 The look is two independent effects:
 
@@ -10,9 +8,7 @@ The look is two independent effects:
    renderer to every path. This is the same mechanism `plt.xkcd()` uses.
 2. **Grain** — `ChalkEffect`, a custom path effect installed into
    `rcParams["path.effects"]`. It redraws each stroke as a cloud of jittered
-   chalk grains rendered with `renderer.draw_markers` (the fast C path, the same
-   one `scatter` uses). Cost scales with the **number of artists**, not with a
-   point count you tune by hand — a whole figure is a few milliseconds.
+   chalk grains rendered with `renderer.draw_markers`.
 
 Requires an Agg-based backend (the default). `path.sketch` and `draw_markers`
 are Agg features.
@@ -38,8 +34,9 @@ chalk()
 ## `chalk(...)`
 
 The global activator. Sets the blackboard colours, the `path.sketch` wobble, and
-installs a `ChalkEffect`. Returns an `rc_context`, so use it with `with` for a
-scoped effect or call it bare to apply for the rest of the session.
+installs a `ChalkEffect`. Returns a context manager that captures the current
+`rcParams` before applying the style and restores them on `with` exit; call it
+bare to apply for the rest of the session (no restore).
 
 | Keyword | Default | Description |
 |---|---|---|
@@ -76,6 +73,7 @@ also be attached to a single artist with `artist.set_path_effects([ChalkEffect()
 | `grain` | `2.2` | Base grain (chalk speck) diameter in pixels. The three internal layers scale this by ×1.0, ×0.6 and ×1.9. |
 | `alpha` | `0.9` | Overall opacity multiplier for the grains. |
 | `passes` | `3` | Number of grain copies laid down per stroke. More → denser, creamier, slower. |
+| `ref_linewidth` | `2.0` | Reference stroke width (points) that `spread` and `grain` are tuned for. Each stroke's own `linewidth` (from `lw=` / `rcParams["lines.linewidth"]`) is divided by this and the ratio, clamped to `[0.35, 3.0]`, scales its chalk width — so thin lines draw thin, thick lines draw fat. The default `2.0` matches `chalk()`'s `lines.linewidth`. Set to `None` (or `0`) to ignore `linewidth` and draw every stroke at `spread`/`grain` as-is. |
 | `seed` | `None` | Seed for the RNG. Set an int for reproducible dust across renders. |
 
 ### Centre-line wobble (independent of `path.sketch`)
@@ -89,8 +87,11 @@ also be attached to a single artist with `artist.set_path_effects([ChalkEffect()
 
 | Keyword | Default | Description |
 |---|---|---|
-| `keep_fill` | `True` | For filled patches (bars, wedges, `fill_between`), paint the original face colour first, then lay chalk on the outline. `False` drops the fill and keeps only the grained edge. |
-| `min_extent` | `26.0` | Strokes whose pixel bounding box is smaller than this in **both** dimensions are drawn normally (still wobbled by `path.sketch`) instead of grained — keeps tick marks and small markers crisp. Text is additionally spared via a separate check (filled multi-subpath runs no taller than `3 × min_extent`). Set to `0` to texturize everything, including glyphs. |
+| `keep_fill` | `True` | For filled patches (bars, wedges, `fill_between`), paint the original face colour **flat** first, then lay chalk on the outline. `False` drops the fill and keeps only the grained edge. |
+| `fill_density` | `0.0` | Grains per 100×100 px scattered across a filled patch's **interior**, so the fill itself is chalky rather than a flat block. `0` leaves it flat. Roughly `300` for light shading, `2000`+ for a near-solid dusty fill. Pair with `keep_fill=False` for a translucent shaded look, or `keep_fill=True` for a flat base plus dusty overlay. |
+| `fill_max` | `20000` | Hard cap on interior grains per patch, so a huge polygon can't blow up the draw time. |
+| `skip_text` | `True` | Never grain text — draw every glyph crisp. Detected structurally: a filled path drawn with linewidth 0 (matplotlib's `_draw_text_as_path` forces that) that is also curved, multi-subpath, or short (`< 4 × min_extent` px tall) — so straight-edged digits and the minus sign are caught too. Checked **before** the `min_extent` guard so short tick labels don't slip through. `False` lets text be grained. The chalk look for labels comes from the `font` you pass to `chalk()`, not the grain. |
+| `min_extent` | `26.0` | Artists whose pixel bounding box is smaller than this in **both** dimensions skip the grainy **outline** (it would just swamp them) and get a crisp edge instead — keeps tick marks and small markers sharp. A small **filled** patch (a short histogram bar) still gets the `keep_fill` / `fill_density` fill treatment, so it matches its taller neighbours. Set to `0` to texturize everything. |
 | `flat_bg` | `0.5` | A filled rectangle (≤ 5 vertices) whose bounding box covers at least this fraction of the canvas is painted **flat, with no grain**. This removes the grainy frame around the whole figure and the redundant border on the axes background — the spines still get chalked. Set to `1.0` to spare only a full-canvas figure patch, or `0` to grain every rectangle. |
 
 ---
@@ -192,9 +193,11 @@ some_line.set_path_effects([])     # this one line stays crisp
 - **Agg only.** `path.sketch` and `renderer.draw_markers` are Agg-renderer
   features; the SVG/PDF backends will not reproduce the grain.
 - **Text** is routed through the path-effects machinery once `path.effects` is
-  set. `ChalkEffect` detects and spares it (see `min_extent`), so labels stay
-  legible; large display text above `~3 × min_extent` px tall will still get
-  grained.
+  set. `ChalkEffect` detects it structurally — a filled path drawn with
+  linewidth 0 (matplotlib's `_draw_text_as_path` forces that) that is curved,
+  multi-subpath, or short — and always draws it crisp. The chalk look for text
+  comes from the `font` you pass, not the grain. Set `skip_text=False` to grain
+  it anyway.
 - **Plot markers** (`marker="o"` etc.) become fuzzy chalk blobs — on theme, but
   be aware.
 - The grain is regenerated every draw. With `seed=None` an interactive figure

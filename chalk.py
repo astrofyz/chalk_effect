@@ -29,6 +29,7 @@ Requires an Agg-based backend (the default): ``path.sketch`` and
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path as _FSPath
 
 import numpy as np
@@ -167,17 +168,29 @@ class ChalkEffect(AbstractPathEffect):
     keep_fill : bool
         If True, still paint the original face colour for filled patches
         (bars, wedges, fill_between) before laying chalk on the outline.
+    fill_density : float
+        Grains per 100x100 px scattered across a filled patch's *interior*
+        to make the fill itself chalky (not just a flat colour).  ``0``
+        (default) leaves the fill flat -- see ``keep_fill``.  Roughly
+        ``300`` for a light shading, ``2000``+ for near-solid dusty fill.
+        Combine with ``keep_fill=False`` for a translucent shaded look, or
+        ``keep_fill=True`` for flat base + dusty overlay.
+    fill_max : int
+        Hard cap on interior grains per patch, so a huge polygon can't blow
+        up the draw.  Default ``20000``.
     skip_text : bool
-        If True (default) text is always drawn crisply, never grained --
-        detected structurally: a filled path that has Bezier codes and either
-        several sub-paths (a multi-glyph string) or is no taller than
-        ``4 * min_extent`` (a single big glyph).  ``path.sketch`` still applies
-        to it.  Set False to let text be grained too.
+        If True (default) text is always drawn crisply, never grained.
+        Detected structurally: a filled Bezier path drawn with linewidth 0
+        (matplotlib's ``_draw_text_as_path`` forces that) or with several
+        sub-paths (a multi-glyph string).  ``path.sketch`` still applies to
+        it.  Set False to let text be grained too.
     min_extent : float
-        Strokes whose pixel bounding box is smaller than this in both
-        dimensions are drawn normally (still wobbled by ``path.sketch``)
-        instead of grained.  Keeps tick marks and small markers crisp.
-        Set to 0 to texturize everything.
+        Artists whose pixel bounding box is smaller than this in both
+        dimensions skip the grainy *outline* (which would just swamp them)
+        and are drawn with a crisp edge instead -- keeps tick marks and
+        small markers sharp.  A small *filled* patch (a short histogram bar)
+        still gets the ``keep_fill`` / ``fill_density`` treatment so it
+        matches its taller neighbours.  Set to 0 to texturize everything.
     flat_bg : float
         A filled rectangle (<= 5 vertices) whose bounding box covers at least
         this fraction of the canvas is painted flat, with no grain -- this
@@ -191,9 +204,11 @@ class ChalkEffect(AbstractPathEffect):
     # (fraction of stations kept, size multiple, alpha multiple)
     _LAYERS = ((0.90, 1.0, 0.55), (0.50, 0.6, 0.95), (0.16, 1.9, 0.14))
 
-    def __init__(self, spacing=1.6, spread=1.1, jitter=0.9, wander=2.0,
+    def __init__(self, spacing=2.0, spread=1.5, jitter=0.5, wander=0.2,
                  wander_length=50.0, grain=2.2, alpha=0.9, passes=3, seed=None,
-                 keep_fill=True, skip_text=True, min_extent=26.0, flat_bg=0.5):
+                 keep_fill=True, fill_density=0.0, fill_max=20000,
+                 skip_text=True, min_extent=26.0, flat_bg=0.5,
+                 ref_linewidth=2.0):
         super().__init__()
         self.spacing = spacing
         self.spread = spread
@@ -205,34 +220,63 @@ class ChalkEffect(AbstractPathEffect):
         self.passes = passes
         self.seed = seed
         self.keep_fill = keep_fill
+        self.fill_density = fill_density
+        self.fill_max = fill_max
         self.skip_text = skip_text
         self.min_extent = min_extent
         self.flat_bg = flat_bg
+        self.ref_linewidth = ref_linewidth
 
     def draw_path(self, renderer, gc, tpath, affine, rgbFace=None):
         rng = np.random.default_rng(self.seed)
         path = affine.transform_path(tpath)  # -> pixel space
+
+        # scale chalk width by this stroke's own linewidth relative to the
+        # reference, so thin lines stay thin and fat lines stay fat
+        if self.ref_linewidth:
+            lw_scale = float(np.clip(gc.get_linewidth() / self.ref_linewidth,
+                                     0.35, 3.0))
+        else:
+            lw_scale = 1.0
+        spread = self.spread * lw_scale
+        grain = self.grain * lw_scale
 
         # Draw some things crisply (still wobbled by path.sketch) instead of
         # graining them.
         bb = path.get_extents()
         codes = tpath.codes
 
-        # tick marks / tiny markers -> bbox small in both dims
-        if bb.width < self.min_extent and bb.height < self.min_extent:
-            renderer.draw_path(gc, tpath, affine, rgbFace)
-            return
-
-        # text -> once path.effects is set matplotlib rasterises glyphs through
-        # here as filled Bezier paths; a multi-glyph string has several
-        # sub-paths, a single big glyph is caught by the height limit
-        if self.skip_text and rgbFace is not None and codes is not None:
+        # text -> once path.effects is set matplotlib routes glyphs through here
+        # via _draw_text_as_path, which forces the linewidth to 0 before
+        # calling draw_path (see matplotlib.backend_bases.RendererBase).  A real
+        # filled patch keeps its edge width (chalk() sets patch.force_edgecolor).
+        # Some glyphs -- straight-edged digits, the minus sign -- have no Bezier
+        # codes, so key off lw == 0, not the curves.  Never grain text; its look
+        # comes from the font.  This has to run before the small-artist branch
+        # below, or short tick labels get caught there and dusted.
+        if (self.skip_text and rgbFace is not None and codes is not None
+                and gc.get_linewidth() == 0):
             n_sub = int(np.count_nonzero(codes == Path.MOVETO))
             has_curve = bool(np.any((codes == Path.CURVE3)
                                     | (codes == Path.CURVE4)))
-            if has_curve and (n_sub >= 2 or bb.height < 4 * self.min_extent):
+            # spare glyphs, but not a large zero-width filled polygon
+            if has_curve or n_sub >= 2 or bb.height < 4 * self.min_extent:
                 renderer.draw_path(gc, tpath, affine, rgbFace)
                 return
+
+        # small artists -> don't grain the outline into fuzz
+        if bb.width < self.min_extent and bb.height < self.min_extent:
+            if rgbFace is None:
+                # tick mark / tiny line marker -> draw crisp, done
+                renderer.draw_path(gc, tpath, affine, rgbFace)
+                return
+            # small filled patch (a short histogram bar) -> keep it consistent
+            # with tall bars: crisp thin edge, optional flat base, chalky fill;
+            # just skip the grainy outline that would swamp it
+            face = rgbFace if self.keep_fill else None
+            renderer.draw_path(gc, tpath, affine, face)
+            self._chalk_fill(renderer, gc, path, bb, rgbFace, rng, grain)
+            return
         # big filled rectangle (figure patch, axes background) -> paint flat,
         # no grainy frame around the figure
         if rgbFace is not None and len(tpath.vertices) <= 5 and self.flat_bg > 0:
@@ -248,6 +292,8 @@ class ChalkEffect(AbstractPathEffect):
             renderer.draw_path(gcf, path, IdentityTransform(), rgbFace)
             gcf.restore()
 
+        self._chalk_fill(renderer, gc, path, bb, rgbFace, rng, grain)
+
         stations = []
         for verts in _polylines(path):
             xy = _resample(verts, self.spacing)
@@ -260,7 +306,7 @@ class ChalkEffect(AbstractPathEffect):
             spine = xy + normal * _smooth_noise(
                 rng, len(xy), self.wander, window=win)[:, None]
             for _ in range(self.passes):
-                perp = rng.normal(0.0, self.spread, len(xy))[:, None]
+                perp = rng.normal(0.0, spread, len(xy))[:, None]
                 fuzz = rng.normal(0.0, self.jitter, (len(xy), 2))
                 stations.append(spine + normal * perp + fuzz)
 
@@ -283,11 +329,41 @@ class ChalkEffect(AbstractPathEffect):
             # positional args only: the Agg renderer's draw_markers is a C method
             renderer.draw_markers(
                 gc0,
-                marker, Affine2D().scale(size * self.grain / 2.0),
+                marker, Affine2D().scale(size * grain / 2.0),
                 Path(layer), IdentityTransform(),
                 (r, g, b, min(1.0, a * self.alpha)),
             )
         gc0.restore()
+
+    def _chalk_fill(self, renderer, gc, path, bb, rgbFace, rng, grain):
+        """Scatter grains across a filled patch's interior (``fill_density``)."""
+        if (not self.fill_density or rgbFace is None
+                or bb.width <= 0 or bb.height <= 0):
+            return
+        # constant areal density -> same look on a tall bar and a short one
+        n = int(min(self.fill_density * bb.width * bb.height / 1e4,
+                    self.fill_max))
+        if n <= 0:
+            return
+        pts = np.column_stack([rng.uniform(bb.x0, bb.x1, n),
+                               rng.uniform(bb.y0, bb.y1, n)])
+        pts = pts[path.contains_points(pts)]
+        if not len(pts):
+            return
+        fr, fg, fb, fa = mcolors.to_rgba(rgbFace)
+        gcf = renderer.new_gc()
+        gcf.copy_properties(gc)
+        gcf.set_linewidth(0)
+        gcf.set_sketch_params(None)
+        for size, a in ((1.0, 0.85), (0.55, 1.0)):
+            jit = pts + rng.normal(0.0, 0.5 * self.jitter, pts.shape)
+            renderer.draw_markers(
+                gcf, Path.unit_circle(),
+                Affine2D().scale(size * grain / 2.0),
+                Path(jit), IdentityTransform(),
+                (fr, fg, fb, min(1.0, a * fa * self.alpha)),
+            )
+        gcf.restore()
 
 
 # --------------------------------------------------------------------------- #
@@ -301,8 +377,10 @@ def chalk(sketch=(1.5, 120, 2), grain=None,
           font=None, **grain_kw):
     """Turn the whole figure into chalk-on-a-blackboard.
 
-    Returns an ``rc_context`` so it works with ``with`` *and* is applied
+    Returns a context manager so it works with ``with`` *and* is applied
     immediately when called bare, just like :func:`matplotlib.pyplot.xkcd`.
+    The original ``rcParams`` are captured before the update and restored on
+    ``with`` exit (bare calls leave the chalk style in place).
 
     Parameters
     ----------
@@ -359,8 +437,16 @@ def chalk(sketch=(1.5, 120, 2), grain=None,
         "axes.prop_cycle": cycler(color=_CHALK_CYCLE),
         "font.family": family,
     }
+    orig = mpl.rcParams.copy()
     mpl.rcParams.update(rc)
-    return mpl.rc_context(rc)
+
+    @contextlib.contextmanager
+    def _restore():
+        try:
+            yield
+        finally:
+            mpl.rcParams.update(orig)
+    return _restore()
 
 
 # --------------------------------------------------------------------------- #
