@@ -251,6 +251,17 @@ class ChalkEffect(AbstractPathEffect):
         ``1.0`` to only spare a full-canvas figure patch, or ``0`` to grain
         every rectangle (bars included -- those are always grained anyway,
         being well under any sane fraction).
+    board_smudges : int
+        Number of eraser smudges left on the background (the ``flat_bg``
+        rectangle), drawn behind everything else.  Each is a curved *ribbon*
+        of faint near-white -- constant-ish width, random direction and
+        curvature -- that fades along its length from a sharp leading edge
+        (where the wipe began) to nothing at the tail.  ``0`` (default) is a
+        clean board; these are cheap, so ``20``-``60`` is fine.
+    smudge_alpha : float
+        Opacity of a smudge at its sharp leading edge.  Default ``0.08``.
+    smudge_color : color
+        Streak colour.  Default chalk white ``"#f0f0f0"``.
     """
 
     # (fraction of stations kept, size multiple, alpha multiple)
@@ -261,6 +272,7 @@ class ChalkEffect(AbstractPathEffect):
                  keep_fill=True, fill_density=0.0, fill_max=20000,
                  hatch=None, hatch_spacing=8.0,
                  skip_text=True, min_extent=26.0, flat_bg=0.5,
+                 board_smudges=0, smudge_alpha=0.08, smudge_color="#f0f0f0",
                  ref_linewidth=2.0):
         super().__init__()
         self.spacing = spacing
@@ -280,6 +292,9 @@ class ChalkEffect(AbstractPathEffect):
         self.skip_text = skip_text
         self.min_extent = min_extent
         self.flat_bg = flat_bg
+        self.board_smudges = board_smudges
+        self.smudge_alpha = smudge_alpha
+        self.smudge_color = smudge_color
         self.ref_linewidth = ref_linewidth
 
     def draw_path(self, renderer, gc, tpath, affine, rgbFace=None):
@@ -348,6 +363,7 @@ class ChalkEffect(AbstractPathEffect):
             cw, ch = renderer.get_canvas_width_height()
             if bb.width * bb.height >= self.flat_bg * cw * ch:
                 renderer.draw_path(gc, tpath, affine, rgbFace)
+                self._board_smudges(renderer, gc, bb)
                 return
 
         if self.keep_fill and rgbFace is not None:
@@ -474,6 +490,62 @@ class ChalkEffect(AbstractPathEffect):
             if len(pts) > self.fill_max:
                 pts = pts[rng.random(len(pts)) < self.fill_max / len(pts)]
             self._spray(renderer, gc, pts, color, grain, rng)
+
+    def _board_smudges(self, renderer, gc, bb):
+        """Leave faint eraser ribbons on the background rectangle *bb*.
+
+        Each smudge is a curved strip.  It is built from a stack of
+        translucent copies: the first is a long, narrow, tapering core; each
+        later copy stops shorter and spreads wider.  Overlap piles opacity up
+        at the sharp leading edge (where the wipe began), tapers it to nothing
+        at the tail, and feathers the long edges.  Direction, curvature,
+        length and width are all randomised.
+        """
+        if self.board_smudges <= 0 or bb.width <= 0 or bb.height <= 0:
+            return
+        # own rng, keyed off the box, so figure patch and axes panel differ
+        seed = (None if self.seed is None
+                else (int(self.seed), round(bb.width), round(bb.height)))
+        rng = np.random.default_rng(seed)
+        diag = float(np.hypot(bb.width, bb.height))
+        r, g, b, _ = mcolors.to_rgba(self.smudge_color)
+
+        gcs = renderer.new_gc()
+        gcs.copy_properties(gc)
+        gcs.set_linewidth(0)
+        gcs.set_hatch(None)
+        gcs.set_sketch_params(None)
+
+        passes = 10
+        for _ in range(int(self.board_smudges)):
+            ang = rng.uniform(0.0, 2.0 * np.pi)
+            d = np.array([np.cos(ang), np.sin(ang)])
+            nrm = np.array([-d[1], d[0]])
+            length = rng.uniform(0.10, 0.42) * diag
+            halfw = 0.5 * rng.uniform(7.0, 24.0)
+            bow = rng.uniform(-1.4, 1.4) * halfw
+            p0 = np.array([rng.uniform(bb.x0, bb.x1),
+                           rng.uniform(bb.y0, bb.y1)])
+            k = max(8, int(length / 5.0))
+            t = np.linspace(0.0, 1.0, k)
+            wob = rng.normal(0.0, 0.5, k).cumsum()
+            wob -= wob.mean()
+            spine = (p0[None] + np.outer(t, d) * length
+                     + np.outer(np.sin(t * np.pi) * bow + wob, nrm))
+            # widest at the pressed (leading) end, tapering toward the tail
+            prof = (1.0 - 0.75 * t) * (1.0 + rng.uniform(-0.15, 0.15, k))
+            a_pass = self.smudge_alpha * rng.uniform(0.7, 1.0) / passes
+            for p in range(passes):
+                frac = 1.0 - p / passes               # length this copy covers
+                stop = max(3, int(frac * (k - 1)) + 1)
+                wp = halfw * prof[:stop] * (1.0 + 1.4 * p / passes)
+                fuzz = rng.normal(0.0, 1.0, (stop, 1))
+                left = spine[:stop] + (wp[:, None] + fuzz) * nrm
+                right = spine[:stop] - (wp[:, None] + fuzz) * nrm
+                poly = np.vstack([left, right[::-1]])
+                renderer.draw_path(gcs, Path(poly), IdentityTransform(),
+                                   (r, g, b, a_pass))
+        gcs.restore()
 
 
 # --------------------------------------------------------------------------- #

@@ -95,6 +95,9 @@ also be attached to a single artist with `artist.set_path_effects([ChalkEffect()
 | `skip_text` | `True` | Never grain text — draw every glyph crisp. Detected structurally: a filled path drawn with linewidth 0 (matplotlib's `_draw_text_as_path` forces that) that is also curved, multi-subpath, or short (`< 4 × min_extent` px tall) — so straight-edged digits and the minus sign are caught too. Checked **before** the `min_extent` guard so short tick labels don't slip through. `False` lets text be grained. The chalk look for labels comes from the `font` you pass to `chalk()`, not the grain. |
 | `min_extent` | `26.0` | Artists whose pixel bounding box is smaller than this in **both** dimensions skip the grainy **outline** (it would just swamp them) and get a crisp edge instead — keeps tick marks and small markers sharp. A small **filled** patch (a short histogram bar) still gets the `keep_fill` / `fill_density` fill treatment, so it matches its taller neighbours. Set to `0` to texturize everything. |
 | `flat_bg` | `0.5` | A filled rectangle (≤ 5 vertices) whose bounding box covers at least this fraction of the canvas is painted **flat, with no grain**. This removes the grainy frame around the whole figure and the redundant border on the axes background — the spines still get chalked. Set to `1.0` to spare only a full-canvas figure patch, or `0` to grain every rectangle. |
+| `board_smudges` | `0` | Eraser marks left on the background (the `flat_bg` rectangle), drawn behind everything. Each is a curved **ribbon** of faint near-white that fades along its length from a sharp leading edge, with random direction and curvature — a board that wasn't wiped clean. Cheap (~1 ms for 40); try `20`–`60`. |
+| `smudge_alpha` | `0.08` | Opacity of a smudge at its sharp end. |
+| `smudge_color` | `"#f0f0f0"` | Streak colour. |
 
 ---
 
@@ -168,6 +171,13 @@ with chalk(sketch=None):
 
 Or force one angle on every patch: `chalk(sketch=None, hatch=45)`. Widen the
 lines with `hatch_spacing`.
+
+**Dirty blackboard** — faint eraser ribbons behind the plot:
+
+```python
+with chalk(sketch=None, board_smudges=40):
+    ...
+```
 
 **Recolour the board** (e.g. dark green chalkboard):
 
